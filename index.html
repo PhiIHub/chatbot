@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ChatBot UI</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    .dot {
+      width: 8px;
+      height: 8px;
+      margin: 0 2px;
+      background-color: white;
+      border-radius: 50%;
+      display: inline-block;
+      animation: wave 1.2s infinite ease-in-out both;
+    }
+    .dot:nth-child(1) { animation-delay: 0s; }
+    .dot:nth-child(2) { animation-delay: 0.2s; }
+    .dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes wave {
+      0%, 80%, 100% { transform: scale(0); }
+      40% { transform: scale(1); }
+    }
+  </style>
+</head>
+<body class="dark:bg-gray-900 dark:text-white bg-white text-black min-h-screen flex items-center justify-center">
+  <div class="w-full max-w-3xl p-4">
+    <div class="mb-4">
+      <label for="modelSelect" class="block mb-2 text-sm font-medium">Choose model</label>
+      <select id="modelSelect" class="w-full rounded bg-gray-800 text-white border border-gray-600 p-2 dark:bg-gray-800">
+        <option>Loading models...</option>
+      </select>
+    </div>
+
+    <div id="chat" class="bg-gray-800 rounded-lg p-4 h-96 overflow-y-auto mb-4 space-y-4 border border-gray-700"></div>
+
+    <div class="flex items-center space-x-2">
+      <textarea id="userInput" placeholder="Type a message..." autocomplete="off"
+        class="flex-grow rounded p-2 bg-gray-800 text-white border border-gray-600 h-20 resize-none"></textarea>
+      <input type="file" id="imageInput" multiple accept="image/*" class="hidden" />
+      <button onclick="imageInputEl.click()" class="bg-gray-600 hover:bg-gray-700 text-white rounded px-2 py-2">📎</button>
+      <button onclick="sendMessage()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-2">Send</button>
+    </div>
+
+    <div id="previewContainer" class="mt-2 flex flex-wrap gap-2"></div>
+  </div>
+
+  <script>
+    let models = []
+    let modelName = null
+    let modelCaps = []
+    const history = []
+    const systemPrompt = "You are a helpful assistant."
+    const chatEl = document.getElementById("chat")
+    const modelSelectEl = document.getElementById("modelSelect")
+    const imageInputEl = document.getElementById("imageInput")
+    const previewContainer = document.getElementById("previewContainer")
+    const userInput = document.getElementById("userInput")
+
+    let currentImages = []
+
+    userInput.addEventListener("keydown", e => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault()
+        sendMessage()
+      }
+    })
+
+    imageInputEl.addEventListener("change", () => {
+      previewContainer.innerHTML = ""
+      currentImages = Array.from(imageInputEl.files)
+      currentImages.forEach((img, idx) => {
+        const reader = new FileReader()
+        reader.onload = () => {
+          const wrapper = document.createElement("div")
+          wrapper.className = "relative"
+          const image = document.createElement("img")
+          image.src = reader.result
+          image.className = "h-20 rounded border"
+
+          const btn = document.createElement("button")
+          btn.textContent = "✖"
+          btn.className = "absolute top-0 right-0 text-white bg-black bg-opacity-60 px-1 rounded"
+          btn.onclick = () => {
+            currentImages.splice(idx, 1)
+            imageInputEl.value = ""
+            previewContainer.removeChild(wrapper)
+          }
+
+          wrapper.appendChild(image)
+          wrapper.appendChild(btn)
+          previewContainer.appendChild(wrapper)
+        }
+        reader.readAsDataURL(img)
+      })
+    })
+
+    function modelLabel(m) {
+      const [alias, caps] = Object.entries(m)[0]
+      return `${alias} (${caps.join(', ')})`
+    }
+
+    async function fetchModels() {
+      const res = await fetch("https://text.pollinations.ai/models")
+      const data = await res.json()
+      const anonModels = data.filter(m => m.tier?.includes("anonymous"))
+      models = anonModels
+        .filter(m => typeof m.aliases === 'string' && m.aliases.trim() !== '')
+        .map(m => {
+          let modes = m.input_modalities
+          let active = []
+          if (Array.isArray(modes)) active = modes
+          else if (typeof modes === 'object') active = Object.entries(modes).filter(([k, v]) => v).map(([k]) => k)
+          if (m.input_modalities?.audio) active.push("speech to text")
+          if (m.output_modalities?.audio) active.push("text to speech")
+          return { [m.aliases]: active }
+        })
+
+      modelSelectEl.innerHTML = ""
+      for (const m of models) {
+        const alias = Object.keys(m)[0]
+        const option = document.createElement("option")
+        option.value = alias
+        option.textContent = modelLabel(m)
+        modelSelectEl.appendChild(option)
+      }
+      modelName = modelSelectEl.value
+      modelCaps = Object.values(models.find(m => Object.keys(m)[0] === modelName))[0]
+    }
+
+    modelSelectEl.addEventListener("change", e => {
+      modelName = e.target.value
+      modelCaps = Object.values(models.find(m => Object.keys(m)[0] === modelName))[0]
+      history.length = 0
+      appendChat(`--- Model changed to: ${modelName} ---`, "system")
+    })
+
+    function appendChat(text, sender, imgList = []) {
+      const wrapper = document.createElement("div")
+      wrapper.className = "text-left"
+
+      const msgEl = document.createElement("div")
+      msgEl.className = sender === "system"
+        ? "text-center text-gray-400 text-sm"
+        : sender === "user"
+        ? "bg-blue-700 text-white p-3 rounded-lg inline-block max-w-xs whitespace-pre-wrap"
+        : "bg-gray-700 text-white p-3 rounded-lg inline-block max-w-xs whitespace-pre-wrap"
+
+      msgEl.innerHTML = marked.parse(text)
+      wrapper.appendChild(msgEl)
+
+      for (const src of imgList) {
+        const img = document.createElement("img")
+        img.src = src
+        img.className = "mt-2 max-w-xs rounded border"
+        wrapper.appendChild(img)
+      }
+
+      chatEl.appendChild(wrapper)
+      chatEl.scrollTop = chatEl.scrollHeight
+    }
+
+    async function sendMessage() {
+      const prompt = userInput.value.trim()
+      userInput.value = ""
+      if (!prompt) return
+
+      const imgPromises = currentImages.map(f => toBase64(f).then(b64 => `data:image/jpeg;base64,${b64}`))
+      const imageDataURLs = await Promise.all(imgPromises)
+      appendChat(prompt, "user", imageDataURLs)
+
+      const seed = Math.floor(Math.random() * 1e5)
+      let messages, payload
+
+      if (imageDataURLs.length && modelCaps.includes("image")) {
+        const content = [{ type: "text", text: prompt }, ...imageDataURLs.map(url => ({ type: "image_url", image_url: { url } }))]
+        messages = [
+          { role: "system", content: systemPrompt },
+          { role: "user", content }
+        ]
+        payload = { messages, model: modelName, seed, private: true, stream: true, max_tokens: 300 }
+      } else {
+        if (history.length === 0) history.push({ role: "system", content: systemPrompt })
+        history.push({ role: "user", content: prompt })
+        payload = { messages: history, model: modelName, seed, private: true, stream: true }
+      }
+
+      const wrapper = document.createElement("div")
+      wrapper.className = "text-left"
+      const container = document.createElement("div")
+      container.className = "bg-gray-700 text-white p-3 rounded-lg inline-block max-w-xs whitespace-pre-wrap"
+      const dots = document.createElement("div")
+      dots.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>'
+      container.appendChild(dots)
+      wrapper.appendChild(container)
+      chatEl.appendChild(wrapper)
+      chatEl.scrollTop = chatEl.scrollHeight
+
+      try {
+        const res = await fetch("https://text.pollinations.ai/openai", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        })
+
+        if (!res.ok || !res.body) {
+          container.textContent = "Error: Failed to stream response."
+          return
+        }
+
+        container.innerHTML = ""
+        const decoder = new TextDecoder("utf-8")
+        let buffer = ""
+        const reader = res.body.getReader()
+
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split("\n").filter(l => l.trim().startsWith("data:"))
+          for (const line of lines) {
+            if (line.includes("[DONE]")) break
+            try {
+              const json = JSON.parse(line.replace("data: ", ""))
+              const chunk = json.choices?.[0]?.delta?.content || ""
+              container.innerHTML += marked.parseInline(chunk)
+              chatEl.scrollTop = chatEl.scrollHeight
+            } catch {}
+          }
+          buffer = buffer.slice(buffer.lastIndexOf("\n") + 1)
+        }
+
+        if (!imageDataURLs.length || !modelCaps.includes("image"))
+          history.push({ role: "assistant", content: container.textContent })
+
+        currentImages = []
+        imageInputEl.value = ""
+        previewContainer.innerHTML = ""
+
+      } catch (e) {
+        container.textContent = "Error: Stream exception."
+        console.error(e)
+      }
+    }
+
+    function toBase64(file) {
+      return new Promise((res, rej) => {
+        const reader = new FileReader()
+        reader.onload = () => res(reader.result.split(',')[1])
+        reader.onerror = rej
+        reader.readAsDataURL(file)
+      })
+    }
+
+    fetchModels()
+  </script>
+</body>
+</html>
